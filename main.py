@@ -52,6 +52,7 @@ class Tape:
     close: int
     previous_close: int | None
     session_high: int
+    previous_session_high: int
     new_high: bool
     range_ratio: Fraction
     med240: Fraction
@@ -109,7 +110,8 @@ class TapeScaledHybridDCA:
     def _observe(self, close):
         """Advance only on a CBBTC bar; range is unavailable before 30 closes."""
         previous_close = self.closes[-1] if self.closes else None
-        new_high = close > self.session_high
+        previous_session_high = self.session_high
+        new_high = close > previous_session_high
         self.bar_index += 1
         self.session_high = max(self.session_high, close)
         self.closes.append(close)
@@ -131,7 +133,7 @@ class TapeScaledHybridDCA:
             and med60now < med60prev * Fraction(999, 1000)
         )
         return Tape(
-            close, previous_close, self.session_high, new_high,
+            close, previous_close, self.session_high, previous_session_high, new_high,
             range_ratio, med240, downtrend,
         )
 
@@ -277,8 +279,8 @@ class TapeScaledHybridDCA:
             campaign.exit_requested
             or tape.close <= average_entry * Fraction(193, 200)
             or (trail_armed and tape.close <= campaign.peak * Fraction(124, 125))
-            or (idle_age >= 300 and not campaign.trail_ever_armed)
-            or age >= 720
+            or (idle_age >= 240 and not campaign.trail_ever_armed)
+            or age >= 600
             or (self.bar_index >= 1400 and tape.close >= average_entry * Fraction(201, 200))
             or self.bar_index >= 1436
         )
@@ -297,8 +299,12 @@ class TapeScaledHybridDCA:
 
         if tape.close > tape.med240 * (1 + Fraction(3, 2) * tape.range_ratio):
             return None
+        cleared_breakout = (
+            tape.new_high
+            and tape.close >= tape.previous_session_high * (1 + tape.range_ratio / 4)
+        )
         if campaign.up_stage == 0:
-            if tape.new_high and tape.close >= average_entry * Fraction(201, 200):
+            if cleared_breakout and tape.close >= average_entry * Fraction(201, 200):
                 return Allocation("up", UP_AMOUNTS[0], 1, tape.session_high)
         elif campaign.up_stage == 1:
             if (
@@ -308,7 +314,7 @@ class TapeScaledHybridDCA:
                 and tape.close > tape.previous_close
             ):
                 return Allocation("up", UP_AMOUNTS[1], 2)
-        elif campaign.up_stage == 2 and tape.new_high:
+        elif campaign.up_stage == 2 and cleared_breakout:
             return Allocation("up", UP_AMOUNTS[2], 3)
         return None
 
