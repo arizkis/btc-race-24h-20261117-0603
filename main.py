@@ -242,7 +242,7 @@ class TapeScaledHybridDCA:
     def _starter_amount(self, tape):
         """Keep the first-entry backstop; later starters use depth or flat time."""
         if self.campaigns_started > 0:
-            depth = Fraction(1) if tape.downtrend else Fraction(3, 10)
+            depth = Fraction(1)
             flat_timeout = (
                 self.flat_since_index is not None
                 and self.bar_index - self.flat_since_index >= 120
