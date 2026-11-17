@@ -64,6 +64,7 @@ class Tape:
 @dataclass
 class Campaign:
     first_fill_index: int
+    last_fill_index: int
     peak: int
     down_filled: set[int] = field(default_factory=set)
     up_stage: int = 0
@@ -97,6 +98,7 @@ class TapeScaledHybridDCA:
         self.session_high = 0
         self.campaign = None
         self.campaigns_started = 0
+        self.flat_since_index = None
         self.starter_waiting_for_gate = False
         self.reserve_used = False
         self.any_order_filled = False
@@ -169,7 +171,11 @@ class TapeScaledHybridDCA:
                         if allocation.sleeve == "safety":
                             self.safety_qty = min(int(result["qty"]), held_qty)
                         elif allocation.sleeve == "starter" and held_qty > 0:
-                            self.campaign = Campaign(self.bar_index, close)
+                            self.campaign = Campaign(
+                                first_fill_index=self.bar_index,
+                                last_fill_index=self.bar_index,
+                                peak=close,
+                            )
                             self.campaigns_started += 1
                             self.starter_waiting_for_gate = False
                         elif allocation.sleeve == "down" and self.campaign is not None:
@@ -181,9 +187,12 @@ class TapeScaledHybridDCA:
                                 self.campaign.breakout_fill_index = self.bar_index
                         elif allocation.sleeve == "reserve":
                             self.reserve_used = True
+                    if self.campaign is not None:
+                        self.campaign.last_fill_index = self.bar_index
 
         self.safety_qty = min(self.safety_qty, held_qty)
         if self.campaign is not None and held_qty == 0:
+            self.flat_since_index = self.bar_index
             self.campaign = None
             self.starter_waiting_for_gate = False
 
@@ -229,7 +238,17 @@ class TapeScaledHybridDCA:
         }]
 
     def _starter_amount(self, tape):
-        """The hostile gate permits only a full-range dip before forced entry."""
+        """Keep the first-entry backstop; later starters use depth or flat time."""
+        if self.campaigns_started > 0:
+            depth = Fraction(1) if tape.downtrend else Fraction(3, 10)
+            flat_timeout = (
+                self.flat_since_index is not None
+                and self.bar_index - self.flat_since_index >= 120
+            )
+            if tape.at_depth(depth) or flat_timeout:
+                return 250 * USDC
+            return None
+
         if self.bar_index >= 420:
             return 125 * USDC
         if self.bar_index >= 180 and tape.downtrend:
@@ -253,11 +272,12 @@ class TapeScaledHybridDCA:
         trail_armed = campaign.peak >= average_entry * Fraction(203, 200)
         campaign.trail_ever_armed |= trail_armed
         age = self.bar_index - campaign.first_fill_index
+        idle_age = self.bar_index - campaign.last_fill_index
         return (
             campaign.exit_requested
             or tape.close <= average_entry * Fraction(193, 200)
             or (trail_armed and tape.close <= campaign.peak * Fraction(124, 125))
-            or (age >= 300 and not campaign.trail_ever_armed)
+            or (idle_age >= 300 and not campaign.trail_ever_armed)
             or age >= 720
             or (self.bar_index >= 1400 and tape.close >= average_entry * Fraction(201, 200))
             or self.bar_index >= 1436
@@ -345,7 +365,7 @@ class TapeScaledHybridDCA:
 
         if self.bar_index >= 1380 and not self.any_order_filled:
             return self._buy(state, [Allocation("safety", 30 * USDC)])
-        if tape is None or self.campaigns_started >= 3 or self.bar_index > 1300:
+        if tape is None or self.campaigns_started >= 4 or self.bar_index > 1300:
             return []
         amount = self._starter_amount(tape)
         if amount is None:
