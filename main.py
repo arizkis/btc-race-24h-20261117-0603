@@ -271,15 +271,21 @@ class TapeScaledHybridDCA:
     def _exit_due(self, tape, average_entry):
         campaign = self.campaign
         campaign.peak = max(campaign.peak, tape.close)
-        trail_armed = campaign.peak >= average_entry * Fraction(203, 200)
+        arm_fraction = min(
+            Fraction(3, 200), max(Fraction(3, 400), tape.range_ratio * Fraction(1, 2)),
+        )
+        trail_fraction = min(
+            Fraction(1, 125), max(Fraction(1, 250), tape.range_ratio * Fraction(3, 10)),
+        )
+        trail_armed = campaign.peak >= average_entry * (1 + arm_fraction)
         campaign.trail_ever_armed |= trail_armed
         age = self.bar_index - campaign.first_fill_index
         idle_age = self.bar_index - campaign.last_fill_index
         return (
             campaign.exit_requested
             or tape.close <= average_entry * Fraction(193, 200)
-            or (trail_armed and tape.close <= campaign.peak * Fraction(124, 125))
-            or (idle_age >= 240 and not campaign.trail_ever_armed)
+            or (trail_armed and tape.close <= campaign.peak * (1 - trail_fraction))
+            or (idle_age >= 180 and not campaign.trail_ever_armed)
             or age >= 600
             or (self.bar_index >= 1400 and tape.close >= average_entry * Fraction(201, 200))
             or self.bar_index >= 1436
