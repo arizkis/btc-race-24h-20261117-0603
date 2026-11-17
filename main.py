@@ -57,6 +57,8 @@ class Tape:
     range_ratio: Fraction
     med240: Fraction
     downtrend: bool
+    med60now: Fraction
+    med60prev: Fraction | None
 
     def at_depth(self, fraction):
         return self.close <= self.session_high * (1 - fraction * self.range_ratio)
@@ -74,6 +76,9 @@ class Campaign:
     pullback_index: int | None = None
     trail_ever_armed: bool = False
     exit_requested: bool = False
+    is_endgame: bool = False
+    trigger_print: int | None = None
+    endgame_add_filled: bool = False
 
 
 @dataclass(frozen=True)
@@ -106,6 +111,8 @@ class TapeScaledHybridDCA:
         self.safety_qty = 0
         self.pending = None
         self.next_client_id = 1
+        self.endgame_used = False
+        self.pending_endgame_trigger = None
 
     def _observe(self, close):
         """Advance only on a CBBTC bar; range is unavailable before 30 closes."""
@@ -134,7 +141,7 @@ class TapeScaledHybridDCA:
         )
         return Tape(
             close, previous_close, self.session_high, previous_session_high, new_high,
-            range_ratio, med240, downtrend,
+            range_ratio, med240, downtrend, med60now, med60prev,
         )
 
     @staticmethod
@@ -180,6 +187,17 @@ class TapeScaledHybridDCA:
                             )
                             self.campaigns_started += 1
                             self.starter_waiting_for_gate = False
+                        elif allocation.sleeve == "endgame_starter" and held_qty > 0:
+                            self.campaign = Campaign(
+                                first_fill_index=self.bar_index,
+                                last_fill_index=self.bar_index,
+                                peak=close,
+                                is_endgame=True,
+                                trigger_print=self.pending_endgame_trigger,
+                            )
+                            self.endgame_used = True
+                        elif allocation.sleeve == "endgame_add" and self.campaign is not None:
+                            self.campaign.endgame_add_filled = True
                         elif allocation.sleeve == "down" and self.campaign is not None:
                             self.campaign.down_filled.add(allocation.stage)
                         elif allocation.sleeve == "up" and self.campaign is not None:
@@ -268,6 +286,19 @@ class TapeScaledHybridDCA:
             return 250 * USDC
         return None
 
+    def _endgame_eligible(self, tape):
+        return (
+            1150 <= self.bar_index <= 1380
+            and self.campaigns_started >= 4
+            and not self.endgame_used
+            and tape.at_depth(Fraction(1))
+            and not tape.at_depth(Fraction(7, 4))
+            and (
+                tape.med60prev is None
+                or tape.med60now > tape.med60prev * (1 - Fraction(3, 4) * tape.range_ratio)
+            )
+        )
+
     def _exit_due(self, tape, average_entry):
         campaign = self.campaign
         campaign.peak = max(campaign.peak, tape.close)
@@ -285,7 +316,11 @@ class TapeScaledHybridDCA:
             campaign.exit_requested
             or tape.close <= average_entry * Fraction(193, 200)
             or (trail_armed and tape.close <= campaign.peak * (1 - trail_fraction))
-            or (idle_age >= 180 and not campaign.trail_ever_armed)
+            or (
+                idle_age >= 180
+                and not campaign.trail_ever_armed
+                and (not campaign.is_endgame or self.bar_index >= 1400)
+            )
             or age >= 600
             or (self.bar_index >= 1400 and tape.close >= average_entry * Fraction(201, 200))
             or self.bar_index >= 1436
@@ -325,6 +360,14 @@ class TapeScaledHybridDCA:
         return None
 
     def _additions(self, tape, average_entry):
+        if self.campaign.is_endgame:
+            if (
+                not self.campaign.endgame_add_filled
+                and tape.close <= self.campaign.trigger_print * (1 - Fraction(3, 10) * tape.range_ratio)
+            ):
+                return [Allocation("endgame_add", 250 * USDC)]
+            return []
+
         allocations = []
         for rung, (depth, amount) in enumerate(DOWN_RUNGS, start=1):
             if rung in self.campaign.down_filled:
@@ -377,6 +420,11 @@ class TapeScaledHybridDCA:
 
         if self.bar_index >= 1380 and not self.any_order_filled:
             return self._buy(state, [Allocation("safety", 30 * USDC)])
+        if tape is not None and self._endgame_eligible(tape):
+            orders = self._buy(state, [Allocation("endgame_starter", 300 * USDC)])
+            if orders:
+                self.pending_endgame_trigger = tape.close
+            return orders
         if tape is None or self.campaigns_started >= 4 or self.bar_index > 1300:
             return []
         amount = self._starter_amount(tape)
